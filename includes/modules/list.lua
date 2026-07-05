@@ -1,6 +1,8 @@
 
 local table 	= table
 local pairs		= pairs
+local type		= type
+local istable	= istable or function( value ) return type( value ) == "table" end
 
 module( "list" )
 
