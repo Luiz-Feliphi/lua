@@ -89,6 +89,23 @@ local HOLD_FALLBACK_ORDER = {
   shotgun = { "shotgun", "smg", "pistol" },
 }
 
+-- Categoria de "flinch" (reacao de dor ao tomar dano). O engine pede
+-- alguma dessas ACT automaticamente quando o NPC leva um tiro. Esses
+-- modelos NAO tem animacao de flinch dedicada, entao mapeamos pra
+-- pose de idle armado do hold (garantido que existe) em vez de
+-- deixar cair em T-pose.
+local FLINCH_ACTIVITIES = {
+  ACT_SMALL_FLINCH, ACT_BIG_FLINCH,
+  ACT_FLINCH_HEAD, ACT_FLINCH_CHEST, ACT_FLINCH_STOMACH,
+  ACT_FLINCH_LEFTARM, ACT_FLINCH_RIGHTARM,
+  ACT_FLINCH_LEFTLEG, ACT_FLINCH_RIGHTLEG,
+  ACT_FLINCH_PHYSICS,
+}
+local IS_FLINCH_ACTIVITY = {}
+for _, a in ipairs( FLINCH_ACTIVITIES ) do
+  IS_FLINCH_ACTIVITY[ a ] = true
+end
+
 -- Fallbacks genericos (usados so se nem a familia HL2MP nem a
 -- classica de NPC forem encontradas -- ultimo recurso).
 ENT.ActivityFallbacks = {
@@ -101,6 +118,39 @@ ENT.ActivityFallbacks = {
   [ACT_COWER]          = { ACT_IDLE },
   [ACT_CROUCHIDLE]     = { ACT_IDLE },
 }
+for _, a in ipairs( FLINCH_ACTIVITIES ) do
+  ENT.ActivityFallbacks[ a ] = { ACT_IDLE_ANGRY, ACT_IDLE }
+end
+
+-- Forca a pose de tiro certa na entidade diretamente, no exato
+-- momento em que o ataque comeca. Isso contorna qualquer traducao
+-- de animacao que a propria SWEP da arma (weapon_npc_*) possa estar
+-- fazendo por conta propria e ignorando o nosso TranslateActivity
+-- (o que causa T-pose na hora de atirar mesmo com o fallback certo
+-- configurado aqui).
+function ENT:ForceAttackPose()
+  local act = self:TranslateActivity( ACT_RANGE_ATTACK1 )
+  local seq = self:SelectWeightedSequence( act )
+  if seq != -1 then
+    self:ResetSequence( seq )
+    self.ForcedAttackSeq = seq
+    -- mantem essa pose por 1s (chamado todo Think enquanto durar),
+    -- tempo de sobra pra cobrir a animacao de tiro mesmo se a SWEP
+    -- da arma tentar sobrescrever a sequencia no proprio Think dela.
+    self.ForceAttackPoseUntil = CurTime() + 1
+  end
+end
+
+-- Chamado todo Think(). Se a SWEP da arma reescrever a sequencia
+-- por conta propria (causando T-pose) durante a janela de tiro,
+-- a gente reafirma a sequencia certa de volta no proximo tick.
+function ENT:MaintainAttackPose()
+  if self.ForceAttackPoseUntil and CurTime() < self.ForceAttackPoseUntil and self.ForcedAttackSeq then
+    if self:GetSequence() != self.ForcedAttackSeq then
+      self:ResetSequence( self.ForcedAttackSeq )
+    end
+  end
+end
 
 function ENT:TranslateActivity( act )
   -- Se o modelo tem a sequencia certa pra essa ACT exata, usa normalmente.
@@ -121,7 +171,7 @@ function ENT:TranslateActivity( act )
     byHoldTable = HL2MP_WALK_BY_HOLD
   elseif act == ACT_RUN then
     byHoldTable = HL2MP_RUN_BY_HOLD
-  elseif act == ACT_IDLE or act == ACT_CROUCHIDLE or act == ACT_COWER then
+  elseif act == ACT_IDLE or act == ACT_CROUCHIDLE or act == ACT_COWER or IS_FLINCH_ACTIVITY[ act ] then
     byHoldTable = HL2MP_IDLE_BY_HOLD
   elseif act == ACT_RANGE_ATTACK1 or act == ACT_RANGE_ATTACK2 then
     byHoldTable = HL2MP_ATTACK_BY_HOLD

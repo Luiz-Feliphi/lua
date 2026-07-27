@@ -3,13 +3,17 @@ AddCSLuaFile( "shared.lua" )
 include('shared.lua')
 
 -- Preset
+-- NOTA: estes campos (loot, modelos, sons) ainda estão IDÊNTICOS
+-- aos do bandit porque foi assim que o arquivo original do merc
+-- chegou até mim. Troque lootGroup/models/sons abaixo pelos
+-- assets reais do mercenário quando tiver eles à mão.
 ENT.bleeds      = true
 ENT.StartHealth = 100
 ENT.PlayerFriendly = false
 ENT.flatbulletresistance = 25
 ENT.percentbulletresistance = 20
 ENT.lootChance = 33
-ENT.lootGroup = "bandit_pistol_loot"
+ENT.lootGroup = "merc_pistol_loot" -- ajuste para o loot group correto do merc
 ENT.selectedWeaponItem = nil 
 ENT.selectedWeaponSWEP = nil
 
@@ -60,7 +64,7 @@ ENT.diesounds    = {
 }
 
 ENT.models       = {
-  "models/killer/killer.mdl",
+  "models/killer/killer.mdl", -- ajuste para o(s) modelo(s) real(is) do merc
   "models/killer/mask.mdl",
 }
 
@@ -148,7 +152,7 @@ function ENT:OnTakeDamage(dmg)
   end
 
   if (dmg:GetAttacker():GetClass() != self:GetClass() && dmg:IsDamageType(DMG_BULLET)) then
-    self:AddEntityRelationship( dmg:GetAttacker(), 1, 10 )
+    self:AddEntityRelationship( dmg:GetAttacker(), D_HT, 10 )
     self:SetEnemy(dmg:GetAttacker())
   end
 
@@ -164,36 +168,38 @@ local schedd = ai_schedule.New( "FireSched" )
 schedd:EngTask( "TASK_FACE_ENEMY",       0 )
 schedd:EngTask( "TASK_RANGE_ATTACK1",    0 )
 
+-- ============================================================
+-- FACÇÕES: merc é hostil a bandit e militar, aliado de outros
+-- Ajuste as duas listas abaixo se quiser outra matriz de facção.
+-- ============================================================
+ENT.HostileClasses = {
+  "npc_human_bandit_*",
+  "npc_human_mili_*",
+  "npc_human_z_*",
+  "npc_mutant_*",
+}
+
+ENT.FriendlyClasses = {
+  "npc_human_merc_*",
+}
+
 function ENT:InitEnemies()
-  local zombifiedtable = ents.FindByClass("npc_human_z_*")
-  local bandittable = ents.FindByClass("npc_human_bandit_*")
-  local merctable = ents.FindByClass("npc_human_merc_*")
-  local militable = ents.FindByClass("npc_human_mili_*")
-  local mutanttable = ents.FindByClass("npc_mutant_*")
-
-  for _, x in pairs(zombifiedtable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
+  -- Hostil: bandit (e militar, se aplicável)
+  for _, class in ipairs(self.HostileClasses) do
+    local found = ents.FindByClass(class)
+    for _, x in pairs(found) do
+      x:AddEntityRelationship( self, D_HT, 10 )
+      self:AddEntityRelationship( x, D_HT, 10 )
+    end
   end
 
-  for _, x in pairs(bandittable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
-  end
-
-  for _, x in pairs(merctable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
-  end
-
-  for _, x in pairs(militable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
-  end
-
-  for _, x in pairs(mutanttable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
+  -- Aliado: outros mercs
+  for _, class in ipairs(self.FriendlyClasses) do
+    local found = ents.FindByClass(class)
+    for _, x in pairs(found) do
+      x:AddEntityRelationship( self, D_LI, 10 )
+      self:AddEntityRelationship( x, D_LI, 10 )
+    end
   end
 end
 

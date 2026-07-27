@@ -166,36 +166,39 @@ local schedd = ai_schedule.New( "FireSched" )
 schedd:EngTask( "TASK_FACE_ENEMY",       0 )
 schedd:EngTask( "TASK_RANGE_ATTACK1",    0 )
 
+
+-- ============================================================
+-- FACÇÕES: merc é hostil a bandit e militar, aliado de outros
+-- Ajuste as duas listas abaixo se quiser outra matriz de facção.
+-- ============================================================
+ENT.HostileClasses = {
+  "npc_human_merc_*",
+  "npc_human_mili_*",
+  "npc_human_z_*",
+  "npc_mutant_*",
+}
+
+ENT.FriendlyClasses = {
+  "npc_human_bandit_*",
+}
+
 function ENT:InitEnemies()
-  local zombifiedtable = ents.FindByClass("npc_human_z_*")
-  local bandittable = ents.FindByClass("npc_human_bandit_*")
-  local merctable = ents.FindByClass("npc_human_merc_*")
-  local militable = ents.FindByClass("npc_human_mili_*")
-  local mutanttable = ents.FindByClass("npc_mutant_*")
-
-  for _, x in pairs(zombifiedtable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
+  -- Hostil: bandit (e militar, se aplicável)
+  for _, class in ipairs(self.HostileClasses) do
+    local found = ents.FindByClass(class)
+    for _, x in pairs(found) do
+      x:AddEntityRelationship( self, D_HT, 10 )
+      self:AddEntityRelationship( x, D_HT, 10 )
+    end
   end
 
-  for _, x in pairs(bandittable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
-  end
-
-  for _, x in pairs(merctable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
-  end
-
-  for _, x in pairs(militable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
-  end
-
-  for _, x in pairs(mutanttable) do
-    x:AddEntityRelationship( self, D_LI, 10 )
-    self:AddEntityRelationship( x, D_LI, 10 )
+  -- Aliado: outros mercs
+  for _, class in ipairs(self.FriendlyClasses) do
+    local found = ents.FindByClass(class)
+    for _, x in pairs(found) do
+      x:AddEntityRelationship( self, D_LI, 10 )
+      self:AddEntityRelationship( x, D_LI, 10 )
+    end
   end
 end
 
@@ -208,6 +211,7 @@ function ENT:Think()
     end
 
     self:FixAnimationDesync()
+    self:MaintainAttackPose()
   end
 end
 
@@ -263,6 +267,15 @@ function ENT:SelectSchedule()
 
       self.WasInCombat = true
 
+      if self.WantsCoverAfterBurst then
+        self.WantsCoverAfterBurst = false
+        -- Nao forcamos mais SCHED_TAKE_COVER_FROM_ENEMY aqui (isso
+        -- costumava travar em T-pose se o mapa nao tivesse node
+        -- graph pra cobertura). Deixamos a logica normal abaixo
+        -- (distancia/LOS) decidir a proxima acao, que so usa
+        -- schedules/animacoes que a gente ja sabe que funcionam.
+      end
+
       if self.speaktime < CurTime() then
         self.speaktime = CurTime() + 8
         if math.random(1,100) < 30 then
@@ -280,6 +293,7 @@ function ENT:SelectSchedule()
           self:SetSchedule(SCHED_ESTABLISH_LINE_OF_FIRE) --move to shoot enemy
         else
           if (self.NextAttack < CurTime() and self:HasLOS()) then
+            self:ForceAttackPose()
             self:StartSchedule(schedd)
             return
           end

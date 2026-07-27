@@ -103,7 +103,7 @@ function SWEP:Holster( wep )
 end
 	
 function SWEP:PrimaryAttack()
-/*	self.Owner:SetAnimation( PLAYER_ATTACK1 )
+	self.Owner:SetAnimation( PLAYER_ATTACK1 )
 	if ( !SERVER ) then return end
 	
 	-- Apparently we need this because it won't work right in multiplayer.
@@ -162,7 +162,7 @@ function SWEP:PrimaryAttack()
 			tr.Entity:TakeDamageInfo( dmginfo )
 		end
 	end )
-	self:SetNextPrimaryFire( CurTime() + 1 )*/
+	self:SetNextPrimaryFire( CurTime() + 1 )
 end 
 
 function SWEP:SecondaryAttack()
