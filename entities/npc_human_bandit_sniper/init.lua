@@ -130,6 +130,21 @@ function ENT:Initialize()
   self:InitEnemies()
 
   self:SetCurrentWeaponProficiency(WEAPON_PROFICIENCY_VERY_GOOD )
+
+  -- Forca a pose de idle certa logo no spawn, pra nao ficar nem
+  -- um instante na sequencia 0 ("ragdoll", que E um T-pose
+  -- visualmente nesse modelo) antes do primeiro Think(). Prioriza
+  -- o nome exato da sequencia, que sabemos que existe de verdade.
+  local idleByName = self:ResolveHoldSequence( "idle_" )
+  if idleByName > 0 then
+    self:ResetSequence( idleByName )
+  else
+    local idleAct = self:TranslateActivity( ACT_IDLE )
+    local idleSeq = self:SelectWeightedSequence( idleAct )
+    if idleSeq != -1 and idleSeq != 0 then
+      self:ResetSequence( idleSeq )
+    end
+  end
 end
    
 function ENT:OnTakeDamage(dmg)
@@ -219,8 +234,25 @@ end
 -- da animacao, mas o AI continua movendo o NPC normalmente.
 -- ============================================================
 function ENT:FixAnimationDesync()
-  if self:GetSequence() == -1 then
-    self:ResetSequence( self:SelectWeightedSequence( ACT_IDLE ) )
+  -- IMPORTANTE: nesses modelos (flaymi/Anomaly) a sequencia
+  -- INDICE 0 se chama literalmente "ragdoll" -- e uma pose de
+  -- referencia pra fisica, NAO um idle, e visualmente E um
+  -- T-pose. Se o NPC cair pra sequencia 0 OU -1 por QUALQUER
+  -- motivo (inclusive falha interna do engine antes de chegar
+  -- no nosso TranslateActivity), a gente forca pelo NOME exato
+  -- (idle_<hold>) que sabemos que existe de verdade no modelo.
+  local seq = self:GetSequence()
+  if seq == -1 or seq == 0 then
+    local idleByName = self:ResolveHoldSequence( "idle_" )
+    if idleByName > 0 then
+      self:ResetSequence( idleByName )
+    else
+      local idleAct = self:TranslateActivity( ACT_IDLE )
+      local idleSeq = self:SelectWeightedSequence( idleAct )
+      if idleSeq != -1 and idleSeq != 0 then
+        self:ResetSequence( idleSeq )
+      end
+    end
   end
 
   if self:GetPlaybackRate() == 0 then

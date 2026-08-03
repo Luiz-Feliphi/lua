@@ -37,8 +37,24 @@ end
 --    certeza se o problema e a Activity X ou Y no .mdl.
 -- ============================================================
 
-if not ConVarExists( "sv_bandit_debug_anim" ) then
-  CreateConVar( "sv_bandit_debug_anim", "0", FCVAR_ARCHIVE, "1 = loga no console quais Activities estao faltando nos modelos dos bandits" )
+-- Antes usava um ConVar server-side (sv_bandit_debug_anim), mas isso
+-- exige acesso ao console do servidor/RCON pra ligar, o que nao
+-- funciona pra quem so tem o console do jogo num servidor dedicado.
+-- Um concommand digitado no CONSOLE DO CLIENTE (~) e repassado pro
+-- servidor automaticamente pelo proprio engine, sem precisar de RCON.
+if SERVER then
+  BANDIT_DEBUG_ANIM = BANDIT_DEBUG_ANIM or false
+
+  if not concommand.GetTable()[ "bandit_debug_anim" ] then
+    concommand.Add( "bandit_debug_anim", function( ply, cmd, args )
+      BANDIT_DEBUG_ANIM = ( args[1] != "0" )
+      local msg = "[BanditAI] Debug de animacao: " .. ( BANDIT_DEBUG_ANIM and "LIGADO" or "DESLIGADO" )
+      print( msg )
+      if IsValid( ply ) then
+        ply:PrintMessage( HUD_PRINTCONSOLE, msg )
+      end
+    end )
+  end
 end
 
 -- Os modelos STALKER (flaymi/Anomaly) usam a familia de animacao
@@ -122,37 +138,186 @@ for _, a in ipairs( FLINCH_ACTIVITIES ) do
   ENT.ActivityFallbacks[ a ] = { ACT_IDLE_ANGRY, ACT_IDLE }
 end
 
--- Forca a pose de tiro certa na entidade diretamente, no exato
--- momento em que o ataque comeca. Isso contorna qualquer traducao
--- de animacao que a propria SWEP da arma (weapon_npc_*) possa estar
--- fazendo por conta propria e ignorando o nosso TranslateActivity
--- (o que causa T-pose na hora de atirar mesmo com o fallback certo
--- configurado aqui).
+-- ============================================================
+-- FIX DEFINITIVO v2: nome exato da sequencia, nao Activity
+-- ============================================================
+-- Explorando o modelo no HLMV, confirmamos que ele tem sequencias
+-- NOMEADAS tipo "shoot_pistol", "shoot_ar2", "shoot_shotgun",
+-- "shoot_smg1", "reload_pistol", etc. -- mas elas podem nao ter
+-- nenhuma Activity ACT_HL2MP_GESTURE_* associada no .qc, entao
+-- SelectWeightedSequence(ACT_...) nunca achava, mesmo a sequencia
+-- existindo de verdade no modelo.
+--
+-- Agora buscamos pelo NOME exato via LookupSequence() e aplicamos
+-- via AddGestureSequence() (a mesma logica de gesture/camada de
+-- antes, so que endereçando a sequencia diretamente por indice em
+-- vez de depender de Activity).
+-- ============================================================
+
+local SEQ_NAME_SUFFIX_BY_HOLD = {
+  pistol  = "pistol",
+  smg     = "smg1",
+  ar2     = "ar2",
+  shotgun = "shotgun",
+}
+
+-- Tenta achar a sequencia certa em cascata pelo NOME, na ordem de
+-- hold de fallback da classe (ex: shotgun -> smg1 -> pistol).
+function ENT:ResolveHoldSequence( prefix )
+  local hold = self.HoldType or "pistol"
+  local holdOrder = HOLD_FALLBACK_ORDER[ hold ] or { "pistol" }
+
+  for _, h in ipairs( holdOrder ) do
+    local suffix = SEQ_NAME_SUFFIX_BY_HOLD[ h ] or h
+    local seq = self:LookupSequence( prefix .. suffix )
+    if seq and seq > 0 then
+      return seq
+    end
+  end
+
+  return -1
+end
+
+function ENT:PlayGestureSequence( seq )
+  if BANDIT_DEBUG_ANIM then
+    print( string.format( "[BanditAI] %s: PlayGestureSequence #%d (%s)", self:GetClass(), seq, self:GetSequenceName( seq ) or "?" ) )
+  end
+  if self._attackGestureLayer then
+    self:RemoveGesture( self._attackGestureLayer )
+  end
+  self._attackGestureLayer = self:AddGestureSequence( seq, true )
+  self:SetLayerBlendIn( self._attackGestureLayer, 0.05 )
+  self:SetLayerBlendOut( self._attackGestureLayer, 0.05 )
+end
+
 function ENT:ForceAttackPose()
+  if BANDIT_DEBUG_ANIM then
+    print( string.format( "[BanditAI] %s: ForceAttackPose() CHAMADA (hold=%s)", self:GetClass(), tostring(self.HoldType) ) )
+  end
+
+  -- 1) Tenta pelo NOME exato da sequencia (ex: "shoot_pistol").
+  local seq = self:ResolveHoldSequence( "shoot_" )
+  if BANDIT_DEBUG_ANIM then
+    print( string.format( "[BanditAI] %s: ForceAttackPose -> ResolveHoldSequence('shoot_') = %s", self:GetClass(), tostring(seq) ) )
+  end
+  if seq > 0 then
+    self:PlayGestureSequence( seq )
+    return
+  end
+
+  -- 2) Cai pra tentativa por Activity (HL2MP gesture), caso o nome
+  --    nao bata mas a Activity exista mesmo assim.
+  local hold = self.HoldType or "pistol"
+  local holdOrder = HOLD_FALLBACK_ORDER[ hold ] or { "pistol" }
+  for _, h in ipairs( holdOrder ) do
+    local act = HL2MP_ATTACK_BY_HOLD[ h ]
+    if act and self:SelectWeightedSequence( act ) != -1 then
+      self:PlayGestureSequence( self:SelectWeightedSequence( act ) )
+      return
+    end
+  end
+
+  -- 3) Ultimo recurso: fallback classico de NPC como sequencia primaria.
   local act = self:TranslateActivity( ACT_RANGE_ATTACK1 )
-  local seq = self:SelectWeightedSequence( act )
-  if seq != -1 then
-    self:ResetSequence( seq )
-    self.ForcedAttackSeq = seq
-    -- mantem essa pose por 1s (chamado todo Think enquanto durar),
-    -- tempo de sobra pra cobrir a animacao de tiro mesmo se a SWEP
-    -- da arma tentar sobrescrever a sequencia no proprio Think dela.
-    self.ForceAttackPoseUntil = CurTime() + 1
+  local classicSeq = self:SelectWeightedSequence( act )
+  if classicSeq != -1 and classicSeq != 0 then
+    self:ResetSequence( classicSeq )
   end
 end
 
--- Chamado todo Think(). Se a SWEP da arma reescrever a sequencia
--- por conta propria (causando T-pose) durante a janela de tiro,
--- a gente reafirma a sequencia certa de volta no proximo tick.
+-- Chamado todo Think() enquanto a janela de tiro estiver ativa.
+-- Com gesture, normalmente nao precisa reafirmar nada (a camada
+-- fica tocando sozinha), mas mantemos como rede de seguranca caso
+-- a gesture seja removida por fora.
 function ENT:MaintainAttackPose()
-  if self.ForceAttackPoseUntil and CurTime() < self.ForceAttackPoseUntil and self.ForcedAttackSeq then
-    if self:GetSequence() != self.ForcedAttackSeq then
-      self:ResetSequence( self.ForcedAttackSeq )
+end
+
+-- Irma da ForceAttackPose, mas pra pose de recarregar.
+function ENT:ForceReloadPose()
+  local seq = self:ResolveHoldSequence( "reload_" )
+  if seq > 0 then
+    self:PlayGestureSequence( seq )
+    return
+  end
+
+  local hold = self.HoldType or "pistol"
+  local holdOrder = HOLD_FALLBACK_ORDER[ hold ] or { "pistol" }
+  for _, h in ipairs( holdOrder ) do
+    local act = HL2MP_RELOAD_BY_HOLD[ h ]
+    if act and self:SelectWeightedSequence( act ) != -1 then
+      self:PlayGestureSequence( self:SelectWeightedSequence( act ) )
+      return
+    end
+  end
+
+  local act = self:TranslateActivity( ACT_RELOAD )
+  local classicSeq = self:SelectWeightedSequence( act )
+  if classicSeq != -1 and classicSeq != 0 then
+    self:ResetSequence( classicSeq )
+  end
+end
+
+-- ACT_VM_* sao as activities que a PROPRIA ARMA manda tocar (via
+-- Weapon:SendWeaponAnim) quando atira/recarrega/troca de arma. Pra
+-- nao depender de editar cada weapon_npc_* uma por uma, a gente
+-- intercepta essas ACTs aqui tambem e resolve pela mesma cascata de
+-- hold -- assim QUALQUER arma que peça uma dessas ja cai pra uma
+-- animacao que o modelo realmente tem.
+local VM_ACT_TO_CATEGORY = {
+  [ACT_VM_PRIMARYATTACK]   = "attack",
+  [ACT_VM_SECONDARYATTACK] = "attack",
+  [ACT_VM_RELOAD]          = "reload",
+  [ACT_VM_IDLE]            = "idle",
+  [ACT_VM_DRAW]            = "idle",
+  [ACT_VM_DEPLOY]          = "idle",
+  [ACT_VM_HOLSTER]         = "idle",
+}
+
+-- ============================================================
+-- Intercepta SetSchedule(): qualquer codigo (arma, addon, etc.) que
+-- tente forcar uma schedule diretamente no NPC por fora do nosso
+-- SelectSchedule() passa por aqui primeiro. Schedules conhecidas por
+-- pedir animacao que esses modelos nao tem (ex: SCHED_TAKE_COVER_FROM_ENEMY
+-- sem node graph no mapa) sao redirecionadas pra uma equivalente que
+-- a gente ja sabe que funciona.
+-- SO existe no servidor: constantes SCHED_* nao existem no cliente
+-- (agendamento de IA e coisa server-side), entao esse bloco quebraria
+-- o cliente se rodasse la (table index is nil).
+-- ============================================================
+if SERVER then
+  local NPC_META = FindMetaTable( "NPC" )
+  local RealSetSchedule = NPC_META and NPC_META.SetSchedule
+
+  local SCHEDULE_REDIRECTS = {
+    [SCHED_TAKE_COVER_FROM_ENEMY] = SCHED_BACK_AWAY_FROM_ENEMY,
+  }
+
+  if NPC_META and RealSetSchedule then
+    function ENT:SetSchedule( sched )
+      local redirect = SCHEDULE_REDIRECTS[ sched ]
+      if redirect then
+        if BANDIT_DEBUG_ANIM then
+          print( string.format( "[BanditAI] %s: SCHED %s redirecionada pra %s (pedida por fora do SelectSchedule)", self:GetClass(), tostring(sched), tostring(redirect) ) )
+        end
+        sched = redirect
+      end
+      RealSetSchedule( self, sched )
     end
   end
 end
 
 function ENT:TranslateActivity( act )
+  -- ACT_VM_* (pedida pela ARMA, nao pelo NPC): traduz pra categoria
+  -- equivalente antes de qualquer outra coisa.
+  local vmCategory = VM_ACT_TO_CATEGORY[ act ]
+  if vmCategory == "attack" then
+    act = ACT_RANGE_ATTACK1
+  elseif vmCategory == "reload" then
+    act = ACT_RELOAD
+  elseif vmCategory == "idle" then
+    act = ACT_IDLE
+  end
+
   -- Se o modelo tem a sequencia certa pra essa ACT exata, usa normalmente.
   if self:SelectWeightedSequence( act ) != -1 then
     return act
@@ -166,17 +331,27 @@ function ENT:TranslateActivity( act )
   --    hold ideal da classe primeiro, depois os proximos da lista
   --    (ex: rifleman tenta ar2 -> smg -> pistol) ate achar um que
   --    o .mdl realmente tenha compilado.
+  --
+  -- IMPORTANTE (confirmado no .qc do modelo): as sequencias de tiro
+  -- e recarga (shoot_*, reload_*) sao "delta" -- soamdas ADITIVAS,
+  -- sem pose de corpo inteiro proprias. Elas SO funcionam como
+  -- gesture (camada), nunca como sequencia PRIMARIA. A schedule
+  -- classica de ataque (TASK_RANGE_ATTACK1) pede pro engine tocar
+  -- ACT_RANGE_ATTACK1 como PRIMARIA -- se a gente traduzisse isso
+  -- pra ACT_HL2MP_GESTURE_RANGE_ATTACK_*, o engine tentaria tocar
+  -- uma delta sozinha como corpo inteiro = T-pose. Por isso NAO
+  -- mapeamos ACT_RANGE_ATTACK1/ACT_RELOAD pra essas aqui: mantemos o
+  -- corpo no idle do hold (seguro) e quem cuida do visual do tiro e
+  -- SO a ForceAttackPose/ForceReloadPose (via gesture, disparada
+  -- pela propria arma), nunca a sequencia primaria.
   local byHoldTable
   if act == ACT_WALK then
     byHoldTable = HL2MP_WALK_BY_HOLD
   elseif act == ACT_RUN then
     byHoldTable = HL2MP_RUN_BY_HOLD
-  elseif act == ACT_IDLE or act == ACT_CROUCHIDLE or act == ACT_COWER or IS_FLINCH_ACTIVITY[ act ] then
+  elseif act == ACT_IDLE or act == ACT_CROUCHIDLE or act == ACT_COWER or IS_FLINCH_ACTIVITY[ act ]
+      or act == ACT_RANGE_ATTACK1 or act == ACT_RANGE_ATTACK2 or act == ACT_RELOAD then
     byHoldTable = HL2MP_IDLE_BY_HOLD
-  elseif act == ACT_RANGE_ATTACK1 or act == ACT_RANGE_ATTACK2 then
-    byHoldTable = HL2MP_ATTACK_BY_HOLD
-  elseif act == ACT_RELOAD then
-    byHoldTable = HL2MP_RELOAD_BY_HOLD
   end
 
   if byHoldTable then
@@ -195,15 +370,40 @@ function ENT:TranslateActivity( act )
 
   for _, fb in ipairs( fallbacks ) do
     if fb and self:SelectWeightedSequence( fb ) != -1 then
-      if GetConVar( "sv_bandit_debug_anim" ):GetBool() then
+      if BANDIT_DEBUG_ANIM then
         print( string.format( "[BanditAI] %s (%s): ACT %s ausente, usando fallback %s (hold=%s)", self:GetClass(), self:GetModel(), tostring(act), tostring(fb), hold ) )
       end
       return fb
     end
   end
 
+  -- Ultimo recurso ABSOLUTO: nada do que a gente mapeou explicitamente
+  -- resolveu (nem HL2MP nem classico). Em vez de desistir e deixar
+  -- T-posar, tenta pelo menos o idle armado do hold -- cobre qualquer
+  -- ACT que a gente nao previu (ex: variantes de "aim" durante
+  -- schedules de cobertura/recuo, como ACT_WALK_AIM).
+  local lastResort = HL2MP_IDLE_BY_HOLD[ hold ]
+  if lastResort and self:SelectWeightedSequence( lastResort ) != -1 then
+    if BANDIT_DEBUG_ANIM then
+      print( string.format( "[BanditAI] %s (%s): ACT %s sem NENHUM mapeamento, usando idle do hold (Activity) como ultimo recurso", self:GetClass(), self:GetModel(), tostring(act) ) )
+    end
+    return lastResort
+  end
+
+  -- Se nem por Activity achou o idle, tenta pelo NOME exato da
+  -- sequencia (ex: "idle_pistol") -- alguns modelos tem a sequencia
+  -- sem Activity associada no .qc.
+  local idleSeqByName = self:ResolveHoldSequence( "idle_" )
+  if idleSeqByName > 0 then
+    if BANDIT_DEBUG_ANIM then
+      print( string.format( "[BanditAI] %s (%s): ACT %s sem mapeamento nem por Activity, usando idle_%s por NOME", self:GetClass(), self:GetModel(), tostring(act), hold ) )
+    end
+    self:ResetSequence( idleSeqByName )
+    return act -- devolve o act original (engine so usa isso pra tentar de novo depois; ja aplicamos a sequencia na mao)
+  end
+
   -- Nenhum fallback funcionou: loga pra voce saber exatamente o que falta no .mdl.
-  if GetConVar( "sv_bandit_debug_anim" ):GetBool() then
+  if BANDIT_DEBUG_ANIM then
     print( string.format( "[BanditAI] AVISO: %s (%s) NAO tem nenhuma sequencia para ACT %s nem fallback -> vai T-posar", self:GetClass(), self:GetModel(), tostring(act) ) )
   end
 
