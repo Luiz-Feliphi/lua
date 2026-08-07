@@ -165,6 +165,14 @@ function ENT:OnTakeDamage(dmg)
   if (dmg:GetAttacker():GetClass() != self:GetClass() && dmg:IsDamageType(DMG_BULLET)) then
     self:AddEntityRelationship( dmg:GetAttacker(), D_HT, 10 )
     self:SetEnemy(dmg:GetAttacker())
+
+    -- FIX: antes so registrava o inimigo e esperava o proximo
+    -- SelectSchedule natural pra virar e encarar -- isso podia
+    -- demorar e parecer "burro" (levava tiro e continuava olhando
+    -- pra outro lugar). Agora forca a reacao de encarar na hora.
+    if IsValid( dmg:GetAttacker() ) then
+      self:SetSchedule( SCHED_COMBAT_FACE )
+    end
   end
 
   self.Alerted = true
@@ -217,7 +225,61 @@ end
 function ENT:Think()
   if self:Health() > 0 then
 
-    if (self.RecheckEnemyTimer or 0) < CurTime() then
+    if BANDIT_DEBUG_ANIM and (self._aiHeartbeat or 0) < CurTime() then
+      self._aiHeartbeat = CurTime() + 4
+      print( string.format( "[BanditAI-Think] %s pos=%s enemy=%s anomalyCheck=%s", self:GetClass(), tostring(self:GetPos()), tostring(IsValid(self:GetEnemy()) and self:GetEnemy():GetClass() or "nenhum"), tostring(self.GetNearbyAnomaly ~= nil) ) )
+    end
+
+    -- PRIORIDADE ABSOLUTA (roda todo tick, interrompe QUALQUER
+    -- schedule em andamento -- inclusive um SCHED_CHASE_ENEMY
+    -- longo, que so voltaria a chamar nosso SelectSchedule
+    -- quando terminasse sozinho, tarde demais pra evitar
+    -- atravessar uma anomalia ou ficar cercado).
+    local nearbyAnomaly = self.GetNearbyAnomaly and self:GetNearbyAnomaly( self.AnomalyDangerRadius )
+    if IsValid( nearbyAnomaly ) then
+      if not self._fleeingAnomaly then
+        self._fleeingAnomaly = true
+        if BANDIT_DEBUG_ANIM then print( string.format( "[BanditAI-Think] %s FUGINDO de anomalia perto", self:GetClass() ) ) end
+        local away = self:GetPos() - nearbyAnomaly:GetPos()
+        away.z = 0
+        if away:LengthSqr() < 1 then away = Vector( 1, 0, 0 ) end
+        away:Normalize()
+        self:SetLastPosition( self:GetPos() + away * 220 )
+        self:SetSchedule( SCHED_FORCED_GO_RUN )
+      end
+      return
+    else
+      self._fleeingAnomaly = false
+    end
+
+    if IsValid( self:GetEnemy() ) and self.CountNearbyHostiles and (self._nextSwarmCheck or 0) < CurTime() then
+      self._nextSwarmCheck = CurTime() + 1
+      if self:CountNearbyHostiles( self.RetreatCheckRadius ) >= self.RetreatEnemyCount then
+        if BANDIT_DEBUG_ANIM then print( string.format( "[BanditAI-Think] %s recuando: cercado por %d inimigos", self:GetClass(), self:CountNearbyHostiles( self.RetreatCheckRadius ) ) ) end
+        self:SetLastPosition( self:FindRetreatPoint( self:GetEnemy() ) )
+        self:SetSchedule( SCHED_FORCED_GO_RUN )
+        return
+      end
+    end
+
+        -- De vez em quando (a cada 3-6s), se estiver bem perto do
+    -- inimigo, quebra o combate estatico pra tentar cobertura em
+    -- vez de so trocar tiro parado no lugar. So faccoes que
+    -- procuram cobertura (self.SeeksCover) fazem isso.
+    if self.SeeksCover and IsValid( self:GetEnemy() ) and self.FindCoverPoint and (self._nextReposition or 0) < CurTime() then
+      self._nextReposition = CurTime() + math.random( 2, 4 )
+      if math.random() < 0.55 and self:GetPos():DistToSqr( self:GetEnemy():GetPos() ) < ( 750 * 750 ) then
+        local coverPoint = self:FindCoverPoint( self:GetEnemy() )
+        if coverPoint then
+          if BANDIT_DEBUG_ANIM then print( string.format( "[BanditAI-Think] %s indo pra cobertura (reposicionamento)", self:GetClass() ) ) end
+          self:SetLastPosition( coverPoint )
+          self:SetSchedule( SCHED_FORCED_GO_RUN )
+          return
+        end
+      end
+    end
+
+if (self.RecheckEnemyTimer or 0) < CurTime() then
       self.RecheckEnemyTimer = CurTime() + 8
       self:InitEnemies()
     end
@@ -264,6 +326,22 @@ end
 
 function ENT:SelectSchedule()
   if self:Alive() then
+
+    -- ============================================================
+    -- PRIORIDADE MAXIMA: anomalia por perto. Ignora tudo (combate
+    -- incluso) e sai andando pra longe primeiro.
+    -- ============================================================
+    local nearbyAnomaly = self:GetNearbyAnomaly( self.AnomalyDangerRadius )
+    if IsValid( nearbyAnomaly ) then
+      local away = self:GetPos() - nearbyAnomaly:GetPos()
+      away.z = 0
+      if away:LengthSqr() < 1 then away = Vector( 1, 0, 0 ) end
+      away:Normalize()
+      self:SetLastPosition( self:GetPos() + away * 220 )
+      self:SetSchedule( SCHED_FORCED_GO_RUN )
+      return
+    end
+
     local haslos = self:HasLOS()
 
     local distance = 0
@@ -287,6 +365,15 @@ function ENT:SelectSchedule()
         -- schedules/animacoes que a gente ja sabe que funcionam.
       end
 
+      -- ============================================================
+      -- Gente demais por perto: melhor recuar do que brigar.
+      -- ============================================================
+      if self:CountNearbyHostiles( self.RetreatCheckRadius ) >= self.RetreatEnemyCount then
+        self:SetLastPosition( self:FindRetreatPoint( self:GetEnemy() ) )
+        self:SetSchedule( SCHED_FORCED_GO_RUN )
+        return
+      end
+
       if self.speaktime < CurTime() then
         self.speaktime = CurTime() + 8
         if math.random(1,100) < 30 then
@@ -303,17 +390,26 @@ function ENT:SelectSchedule()
         if (!haslos) then
           self:SetSchedule(SCHED_ESTABLISH_LINE_OF_FIRE) --move to shoot enemy
         else
-          if (self.NextAttack < CurTime() and self:HasLOS()) then
+          if (self.NextAttack < CurTime() and self:HasLOS() and not self:IsVirtualReloading()) then
             self:ForceAttackPose()
             self:StartSchedule(schedd)
           else
-            self:SetSchedule(SCHED_TAKE_COVER_FROM_ENEMY)
+            -- Recarregando ou esperando o proximo tiro: procura um
+            -- prop solido por perto pra se cobrir em vez de ficar
+            -- parado a mostra.
+            local coverPoint = self:FindCoverPoint( self:GetEnemy() )
+            if coverPoint then
+              self:SetLastPosition( coverPoint )
+              self:SetSchedule( SCHED_FORCED_GO_RUN )
+            else
+              self:SetSchedule( SCHED_BACK_AWAY_FROM_ENEMY )
+            end
           end
         end
-      elseif ( haslos and distance < 200 and (self.NextAttack or 0) < CurTime()) then
+      elseif ( haslos and distance < 200 and (self.NextAttack or 0) < CurTime() and not self:IsVirtualReloading()) then
         self:ForceAttackPose()
         self:StartSchedule(schedd)
-        self.NextAttack = CurTime() + 2
+        self.NextAttack = CurTime() + 0.15 -- so o suficiente pra nao re-triggar a mesma schedule no mesmo tick; o ritmo de tiro de verdade e o da arma
       else
         self.TakingCover = false
         self:SetSchedule(SCHED_CHASE_ENEMY)//move to shoot enemy
